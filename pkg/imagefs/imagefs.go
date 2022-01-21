@@ -20,15 +20,15 @@ import (
 )
 
 //Get generates a file system of the image and returns file system path
-func Get(imageName, buildContextDir string) (string, error) {
+func Get(imageName, buildContextDir string) (string, string, string, string, error) {
 	rootDir := ""
 	imageRefs, err := getImageReferences(imageName)
 	if err != nil {
 		fmt.Printf("\nerror in getImageReferences: %s", err.Error())
-		return "", errors.Wrap(err, "getting image references from container registry")
+		return "", "", "", "", errors.Wrap(err, "getting image references from container registry")
 	}
 	if len(imageRefs) == 0 {
-		return "", fmt.Errorf("\n%d image references found for %q", len(imageRefs), imageName)
+		return "", "", "", "", fmt.Errorf("\n%d image references found for %q", len(imageRefs), imageName)
 	}
 	refData := imageRefs[0]
 	if len(imageRefs) > 1 {
@@ -46,21 +46,21 @@ func Get(imageName, buildContextDir string) (string, error) {
 	ref, err := name.ParseReference(refData.Digest)
 	if err != nil {
 		fmt.Printf("\nparsing reference %s", imageName)
-		return "", errors.Wrap(err, "parsing image reference")
+		return "", "", "", "", errors.Wrap(err, "parsing image reference")
 	}
 
 	img, err := remote.Image(ref)
 	if err != nil {
 		fmt.Printf("\nerror getting image %q", ref.Name())
-		return "", errors.Wrap(err, "getting remote image")
+		return "", "", "", "", errors.Wrap(err, "getting remote image")
 	}
 
 	rootDir, err = generateImageFileSystem(buildContextDir, img, ref)
 	if err != nil {
 		fmt.Printf("\nerror from getImageFileSystem(): %s", err.Error())
-		return "", errors.Wrap(err, "creating image fifle system")
+		return "", "", "", "", errors.Wrap(err, "creating image fifle system")
 	}
-	return rootDir, nil
+	return rootDir, refData.Digest, refData.OS, refData.Arch, nil
 }
 
 //generateImageFileSystem downloads the image and untar it to the directory
@@ -215,20 +215,22 @@ func getImageReferences(imageName string) ([]struct {
 //untar .tar or .tar.gz file into target directory
 func untar(tarball, target string) error {
 	fmt.Printf("\nuntar %q to %s", tarball, target)
-	file, err := os.Open(tarball)
-	defer file.Close()
+	tarballfile, err := os.Open(tarball)
+	defer tarballfile.Close()
 	if err != nil {
 		return errors.Wrap(err, "opening tarball")
 	}
 	defer os.Remove(tarball)
 
-	var fileReader io.ReadCloser = file
-	defer fileReader.Close()
+	var fileReader io.ReadCloser
 	if strings.HasSuffix(tarball, ".gz") {
-		if fileReader, err = gzip.NewReader(file); err != nil {
+		if fileReader, err = gzip.NewReader(tarballfile); err != nil {
 			return errors.Wrap(err, "creating gzip reader")
 		}
+	} else {
+		fileReader = tarballfile
 	}
+	defer fileReader.Close()
 
 	tarReader := tar.NewReader(fileReader)
 	for {
@@ -248,12 +250,11 @@ func untar(tarball, target string) error {
 			continue
 		}
 		file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode())
-		defer file.Close()
 		if err != nil {
 			return errors.Wrap(err, "creating a file")
 		}
-
 		_, err = io.Copy(file, tarReader)
+		file.Close()
 		if err != nil {
 			return errors.Wrap(err, "copying from tarball to file")
 		}
